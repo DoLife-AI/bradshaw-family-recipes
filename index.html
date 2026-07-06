@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Bradshaw Family Recipes</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.0/dist/chart.umd.js" integrity="sha384-iU8HYtnGQ8Cy4zl7gbNMOhsDTTKX02BTXptVP/vqAWIaTfM7isw76iyZCsjL2eVi" crossorigin="anonymous"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore-compat.js"></script>
 <style>
 :root {
   color-scheme: light;
@@ -280,6 +282,21 @@ const SK = 'brec_v6', SY = 'bsync_v6', SS = 'bseeded_v6';
 // Menu history covered by the seed data
 const SEED_THROUGH = '2026/05/18';
 
+// ── Firebase cross-device sync ────────────────────────────────────────────────
+// Paste your Firebase web-app config below. Until it's filled in, the app runs
+// in local-only mode (recipes save in this browser only).
+const FIREBASE_CONFIG = {
+  apiKey: "PASTE_API_KEY",
+  authDomain: "PASTE.firebaseapp.com",
+  projectId: "PASTE_PROJECT_ID",
+  storageBucket: "PASTE.appspot.com",
+  messagingSenderId: "PASTE_SENDER_ID",
+  appId: "PASTE_APP_ID"
+};
+const CLOUD_ON = !!FIREBASE_CONFIG.projectId && !FIREBASE_CONFIG.projectId.startsWith('PASTE');
+const CLOUD_DOC = 'shared/recipes';   // single shared document for the whole family
+let db=null, docRef=null, applyingRemote=false;
+
 const CE = {
   Chicken:'cc', Pork:'pc', Beef:'bc', Seafood:'sc',
   'Vegetarian':'vc', 'Soups & Stews':'spc', Other:'oc'
@@ -368,32 +385,65 @@ let topChart=null, catChart=null;
 // ── init ──────────────────────────────────────────────────────────────────────
 function init() {
   try {
+    // 1) Instant render from the local cache (or seed data on very first load)
     const saved = localStorage.getItem(SK);
-    const seeded = localStorage.getItem(SS);
-
-    if (!seeded) {
-      // First load ever — seed from historical data
+    if (saved) {
+      recipes = JSON.parse(saved);
+    } else {
       recipes = SEED_DATA.recipes.slice();
       localStorage.setItem(SK, JSON.stringify(recipes));
-      localStorage.setItem(SY, SEED_DATA.syncedThrough);
-      localStorage.setItem(SS, '1');
-      document.getElementById('syncInfo').textContent =
-        'Loaded ' + recipes.length + ' recipes from menu history (2020–2026)';
-    } else if (saved) {
-      recipes = JSON.parse(saved);
-      const sy = localStorage.getItem(SY);
-      const dateLabel = sy
-        ? (sy.includes('/') ? sy : new Date(sy).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}))
-        : 'unknown date';
-      document.getElementById('syncInfo').textContent =
-        recipes.length + ' recipes · menu history through ' + dateLabel;
     }
-
     renderAll();
+
+    // 2) Connect to the cloud so every device shares the same list
+    if (CLOUD_ON) startCloudSync();
+    else setSyncInfo(recipes.length + ' recipes · saved on this device only');
   } catch(e) {
     console.error(e);
     document.getElementById('emptyEl').style.display = 'block';
   }
+}
+
+function setSyncInfo(txt){ document.getElementById('syncInfo').textContent = txt; }
+
+// ── cloud sync (Firebase Firestore) ───────────────────────────────────────────
+function startCloudSync(){
+  try {
+    firebase.initializeApp(FIREBASE_CONFIG);
+    db = firebase.firestore();
+    const [col,id] = CLOUD_DOC.split('/');
+    docRef = db.collection(col).doc(id);
+  } catch(e){
+    console.error('Firebase init failed', e);
+    setSyncInfo(recipes.length + ' recipes · cloud unavailable, using local copy');
+    return;
+  }
+  setSyncInfo('Connecting to the cloud…');
+  // Live listener: pushes remote changes to every open device in real time
+  docRef.onSnapshot(snap => {
+    if (snap.exists && Array.isArray(snap.data().recipes)) {
+      applyingRemote = true;
+      recipes = snap.data().recipes;
+      localStorage.setItem(SK, JSON.stringify(recipes));
+      renderAll();
+      applyingRemote = false;
+      setSyncInfo(recipes.length + ' recipes · ✓ synced across your devices');
+    } else if (!snap.exists) {
+      // First time this database is used — seed it from menu history
+      docRef.set({ recipes: SEED_DATA.recipes, updatedAt: Date.now() })
+        .catch(e => console.error('Seed failed', e));
+    }
+  }, err => {
+    console.error('Cloud sync error', err);
+    setSyncInfo(recipes.length + ' recipes · ⚠ offline, using local copy');
+  });
+}
+
+// Save the current recipe list to the cloud (no-op in local-only mode)
+function cloudSave(){
+  if (!docRef || applyingRemote) return;
+  docRef.set({ recipes, updatedAt: Date.now() })
+    .catch(e => { console.error('Save failed', e); toast('⚠️ Could not save to cloud — will retry when online'); });
 }
 
 function showEmpty() {
@@ -674,7 +724,7 @@ function openModal(id){document.getElementById(id).classList.add('open');}
 function closeModal(id){document.getElementById(id).classList.remove('open');}
 
 // ── utilities ─────────────────────────────────────────────────────────────────
-function persist(){localStorage.setItem(SK,JSON.stringify(recipes));}
+function persist(){localStorage.setItem(SK,JSON.stringify(recipes));cloudSave();}
 function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 function toast(msg,ms=3500){const t=document.getElementById('toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),ms);}
 
